@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build .exe
+        run: pyinstaller --onefile --windowed --name SKCT skct_practice.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SKCT-windows
+          path: dist/SKCT.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build .app
+        run: |
+          pyinstaller --onefile --windowed --name SKCT skct_practice.py
+          cd dist && zip -r SKCT-mac.zip SKCT.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SKCT-macos
+          path: dist/SKCT-mac.zip

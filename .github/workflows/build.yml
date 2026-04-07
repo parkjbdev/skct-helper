@@ -1,8 +1,9 @@
-name: Build
+name: Build & Release
 
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -49,3 +50,19 @@ jobs:
         with:
           name: SKCT-macos
           path: dist/SKCT-mac.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            SKCT-windows/SKCT.exe
+            SKCT-macos/SKCT-mac.zip

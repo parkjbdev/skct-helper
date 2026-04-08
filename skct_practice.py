@@ -101,13 +101,12 @@ class NotepadPanel(tk.Frame):
 
         self.text.bind('<FocusIn>',  lambda e: self.set_active(True))
         self.text.bind('<FocusOut>', lambda e: self.set_active(False))
-        # 계산기 활성 중엔 모든 키 입력을 Text 위젯에 전달 차단
-        self.text.bind('<Key>', self._intercept)
         # 한글 IME Enter: 직접 줄바꿈 삽입 후 이벤트 차단
         self.text.bind('<Return>',   self._handle_return)
         self.text.bind('<KP_Enter>', self._handle_return)
-        # Cmd+A: 시스템 기본 동작으로 처리
-        # (복붙은 _intercept에서 차단)
+        # 복붙 차단 (Cmd+C/V/X) - <Key> 전체 바인딩 없이 개별 처리
+        for k in ('c', 'v', 'x', 'C', 'V', 'X'):
+            self.text.bind(f'<Command-{k}>', lambda e: 'break')
 
     def _intercept(self, event):
         if self._calc_active_fn and self._calc_active_fn():
@@ -119,6 +118,11 @@ class NotepadPanel(tk.Frame):
             return 'break'
 
     def _handle_return(self, event):
+        # 계산기 활성 중이면 = 로 라우팅
+        if self._calc_active_fn and self._calc_active_fn():
+            if self._calc_key_fn:
+                self._calc_key_fn(event)
+            return 'break'
         self.text.insert('insert', '\n')
         return 'break'
 
@@ -132,6 +136,10 @@ class NotepadPanel(tk.Frame):
 
     def show_cursor(self, visible):
         self.text.config(insertwidth=2 if visible else 0)
+        if visible:
+            self.text.unbind('<Key>')
+        else:
+            self.text.bind('<Key>', self._intercept)
 
     def reset(self):
         self.text.delete('1.0', 'end')
@@ -181,10 +189,16 @@ class DrawPanel(tk.Frame):
         self.canvas = tk.Canvas(self, bg='white', cursor='crosshair',
                                 highlightthickness=1, highlightbackground='#d0d0d0')
         self.canvas.pack(fill='both', expand=True, padx=2, pady=2)
-        self.canvas.bind('<Button-1>',     lambda e: self.set_active(True))
+        self.canvas.bind('<Button-1>',     self._on_click)
         self.canvas.bind('<B1-Motion>',    self._draw)
         self.canvas.bind('<ButtonRelease-1>',
                          lambda e: setattr(self, '_last', (None, None)))
+
+    def _on_click(self, e):
+        self.canvas.focus_set()
+        if self._on_focus:
+            self._on_focus()
+        self.set_active(True)
 
     def _draw(self, e):
         lx, ly = self._last
@@ -199,8 +213,6 @@ class DrawPanel(tk.Frame):
         fg = 'white' if active else DARK
         self._hdr.config(bg=bg)
         self._title.config(bg=bg, fg=fg)
-        if active and self._on_focus:
-            self._on_focus()
 
     def reset(self):
         self.canvas.delete('all')
@@ -496,7 +508,8 @@ class SKCTApp:
         pane_h.pack(side='left', fill='both', expand=True,
                     padx=(0, 14), pady=14)
 
-        self._memo_panel = NotepadPanel(pane_h, on_focus=self._deactivate_calc,
+        self._memo_panel = NotepadPanel(pane_h, on_focus=lambda: [self._deactivate_calc(),
+                                                                   self._draw_panel.set_active(False)],
                                          calc_active_fn=lambda: self._calc_active,
                                          calc_key_fn=self._route_key_to_calc)
         pane_h.add(self._memo_panel, minsize=200, stretch='always')
@@ -508,7 +521,7 @@ class SKCTApp:
 
         self._draw_panel = DrawPanel(pane_v,
                                      on_focus=lambda: [self._deactivate_calc(),
-                                                       self._draw_panel.set_active(True)])
+                                                       self._memo_panel.set_active(False)])
         pane_v.add(self._draw_panel, minsize=120, stretch='always')
 
         self._calc_ref = CalcPanel(pane_v, on_activate=self._activate_calc)
@@ -664,13 +677,13 @@ class SKCTApp:
         self.ticking   = True
         self._selected = 0
         self._reset_ans()
-        self.next_btn.set_disabled(True)
-        self.next_btn.set_colors('#b0b8c1', 'white')
+        self.next_btn.set_disabled(False)
+        self.next_btn.set_colors(ACCENT, 'white')
         if self._mode == 'single':
             self.q_lbl.config(text='1문제 연습')
             self.total_lbl.config(text='제한시간  00:45', fg=MID)
             self.ans_grid_frame.pack_forget()
-            self.next_btn.config(text='한 문제 더  →')
+            self.next_btn.config(text='다음 문제  →')
         else:
             self.q_lbl.config(text=f'문제 {self.current_q + 1} / {TOTAL_QUESTIONS}')
             self.ans_grid_frame.pack(fill='x', padx=14, pady=(14, 0))
@@ -769,8 +782,6 @@ class SKCTApp:
         # 계산기 비활성 시 메모장 포커스면 위젯이 자체 처리
 
     def _advance(self):
-        if self._selected == 0:
-            return
         if self._mode == 'full' and not self.ticking:
             return
 
@@ -843,7 +854,7 @@ class SKCTApp:
                 t = times[i]
                 m, s = divmod(int(t), 60)
                 ds   = int((t - int(t)) * 10)
-                ans  = str(answers[i]) if answers[i] else '-'
+                ans  = str(answers[i]) if answers[i] else 'x'
                 tree.insert('', 'end',
                             values=(f'{i+1}번', ans, f'{m:02d}:{s:02d}.{ds}'),
                             tags=('slow',) if t > WARN_SECONDS else ())

@@ -104,17 +104,11 @@ class NotepadPanel(tk.Frame):
         # 한글 IME Enter: 직접 줄바꿈 삽입 후 이벤트 차단
         self.text.bind('<Return>',   self._handle_return)
         self.text.bind('<KP_Enter>', self._handle_return)
-        # 복붙 차단 (Cmd+C/V/X) - <Key> 전체 바인딩 없이 개별 처리
-        for k in ('c', 'v', 'x', 'C', 'V', 'X'):
-            self.text.bind(f'<Command-{k}>', lambda e: 'break')
 
     def _intercept(self, event):
         if self._calc_active_fn and self._calc_active_fn():
             if self._calc_key_fn:
                 self._calc_key_fn(event)
-            return 'break'
-        # 계산기 비활성 시: 복붙만 차단
-        if event.state & 0x8 and event.keysym in ('c', 'v', 'x', 'C', 'V', 'X'):
             return 'break'
 
     def _handle_return(self, event):
@@ -151,9 +145,7 @@ class NotepadPanel(tk.Frame):
 class DrawPanel(tk.Frame):
     def __init__(self, parent, on_focus=None):
         super().__init__(parent, bg=PANEL_BG)
-        self._color    = 'black'
         self._last     = (None, None)
-        self._size     = tk.IntVar(value=3)
         self._on_focus = on_focus
 
         self._hdr = tk.Frame(self, bg='#e4e4e4')
@@ -162,25 +154,8 @@ class DrawPanel(tk.Frame):
                  font=('Apple SD Gothic Neo', 11, 'bold'),
                  bg='#e4e4e4', fg=DARK, padx=8, pady=5)
         self._title.pack(side='left')
-        hdr = self._hdr
 
-        for c, label in [('black','검'), ('red','빨'), ('blue','파'),
-                          ('green','초'), ('white','지우개')]:
-            FlatBtn(hdr, label, bg='#d0d0d0',
-                    fg=c if c != 'white' else DARK,
-                    hover_bg='#b8b8b8',
-                    font=('Apple SD Gothic Neo', 10), padx=5, pady=3,
-                    command=lambda col=c: setattr(self, '_color', col)
-                    ).pack(side='right', padx=1, pady=3)
-
-        tk.Spinbox(hdr, from_=1, to=20, textvariable=self._size,
-                   width=3, bg='#e4e4e4', fg=DARK,
-                   buttonbackground='#d0d0d0', relief='flat'
-                   ).pack(side='right', padx=2, pady=4)
-        tk.Label(hdr, text='굵기', bg='#e4e4e4', fg=DARK,
-                 font=('Apple SD Gothic Neo', 10)).pack(side='right')
-
-        FlatBtn(hdr, '지우기', bg='#d0d0d0', fg=DARK,
+        FlatBtn(self._hdr, '전체지우기', bg='#d0d0d0', fg=DARK,
                 hover_bg='#b8b8b8',
                 font=('Apple SD Gothic Neo', 10), padx=8, pady=3,
                 command=lambda: self.canvas.delete('all')
@@ -204,7 +179,7 @@ class DrawPanel(tk.Frame):
         lx, ly = self._last
         if lx is not None:
             self.canvas.create_line(lx, ly, e.x, e.y,
-                                    fill=self._color, width=self._size.get(),
+                                    fill='black', width=3,
                                     capstyle='round', smooth=True)
         self._last = (e.x, e.y)
 
@@ -367,7 +342,7 @@ class SKCTApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('SKCT 연습')
-        self.root.geometry('1200x680')
+        self.root.geometry('780x960')
         self.root.configure(bg=BG)
         self.root.resizable(True, True)
 
@@ -397,6 +372,18 @@ class SKCTApp:
         self.root.mainloop()
 
     def _build_ui(self):
+        # ── ttk Notebook 다크모드 대응 스타일 ───────────────
+        style = ttk.Style(self.root)
+        style.theme_use('default')
+        style.configure('TNotebook', background=BG, borderwidth=0, relief='flat')
+        style.configure('TNotebook.Tab',
+                        background='#d0d0d0', foreground=DARK,
+                        font=('Apple SD Gothic Neo', 11, 'bold'),
+                        padding=[14, 5])
+        style.map('TNotebook.Tab',
+                  background=[('selected', ACCENT), ('active', '#c0c8d8')],
+                  foreground=[('selected', 'white'), ('active', DARK)])
+
         # ── 왼쪽 컨트롤 패널 ────────────────────────────────
         left = tk.Frame(self.root, bg=BG, width=210)
         left.pack(side='left', fill='y', padx=(14, 0), pady=14)
@@ -502,32 +489,27 @@ class SKCTApp:
             side='left', fill='y', pady=14)
 
         # ── 오른쪽 도구 영역 ─────────────────────────────────
-        pane_h = tk.PanedWindow(self.root, orient='horizontal',
+        pane_v = tk.PanedWindow(self.root, orient='vertical',
                                 bg=DIVIDER, sashwidth=5,
                                 sashrelief='flat', sashpad=0)
-        pane_h.pack(side='left', fill='both', expand=True,
+        pane_v.pack(side='left', fill='both', expand=True,
                     padx=(0, 14), pady=14)
 
-        self._memo_panel = NotepadPanel(pane_h, on_focus=lambda: [self._deactivate_calc(),
-                                                                   self._draw_panel.set_active(False)],
+        self._notebook = ttk.Notebook(pane_v, style='TNotebook')
+        pane_v.add(self._notebook, minsize=120, stretch='always')
+
+        self._memo_panel = NotepadPanel(self._notebook,
+                                         on_focus=lambda: self._deactivate_calc(),
                                          calc_active_fn=lambda: self._calc_active,
                                          calc_key_fn=self._route_key_to_calc)
-        pane_h.add(self._memo_panel, minsize=200, stretch='always')
+        self._notebook.add(self._memo_panel, text='메모장')
 
-        pane_v = tk.PanedWindow(pane_h, orient='vertical',
-                                bg=DIVIDER, sashwidth=5,
-                                sashrelief='flat', sashpad=0)
-        pane_h.add(pane_v, minsize=200, stretch='always')
-
-        self._draw_panel = DrawPanel(pane_v,
-                                     on_focus=lambda: [self._deactivate_calc(),
-                                                       self._memo_panel.set_active(False)])
-        pane_v.add(self._draw_panel, minsize=120, stretch='always')
+        self._draw_panel = DrawPanel(self._notebook,
+                                     on_focus=lambda: self._deactivate_calc())
+        self._notebook.add(self._draw_panel, text='그림판')
 
         self._calc_ref = CalcPanel(pane_v, on_activate=self._activate_calc)
         pane_v.add(self._calc_ref, minsize=260, stretch='never')
-
-        self.root.after(100, lambda: pane_h.sash_place(0, 470, 0))
 
     def _activate_calc(self):
         self._calc_active = True
@@ -677,6 +659,10 @@ class SKCTApp:
         self.ticking   = True
         self._selected = 0
         self._reset_ans()
+        self._memo_panel.reset()
+        self._draw_panel.reset()
+        self._calc_ref.reset()
+        self._deactivate_calc()
         self.next_btn.set_disabled(False)
         self.next_btn.set_colors(ACCENT, 'white')
         if self._mode == 'single':

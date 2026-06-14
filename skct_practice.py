@@ -7,6 +7,7 @@ import subprocess
 TOTAL_QUESTIONS = 20
 TIME_LIMIT      = 15 * 60
 WARN_SECONDS    = 45
+CBT_SUBJECTS    = ['언어이해', '자료해석', '창의수리', '언어추리', '수열추리']
 
 BG       = '#f0f0f0'
 PANEL_BG = '#ffffff'
@@ -101,9 +102,12 @@ class NotepadPanel(tk.Frame):
 
         self.text.bind('<FocusIn>',  lambda e: self.set_active(True))
         self.text.bind('<FocusOut>', lambda e: self.set_active(False))
-        # 한글 IME Enter: 직접 줄바꿈 삽입 후 이벤트 차단
-        self.text.bind('<Return>',   self._handle_return)
-        self.text.bind('<KP_Enter>', self._handle_return)
+        # 한글 IME Enter: keydown은 루트 바인딩만 차단, 실제 동작은 KeyRelease로
+        # (macOS 한글 IME가 keydown을 글자 확정에 소비해도 keyup은 항상 전달됨)
+        self.text.bind('<Return>',               lambda e: 'break')
+        self.text.bind('<KP_Enter>',             lambda e: 'break')
+        self.text.bind('<KeyRelease-Return>',    self._handle_return)
+        self.text.bind('<KeyRelease-KP_Enter>',  self._handle_return)
 
     def _intercept(self, event):
         if self._calc_active_fn and self._calc_active_fn():
@@ -355,7 +359,7 @@ class SKCTApp:
             insertBackground=DARK,
         )
 
-        self._mode      = 'full'   # 'full' | 'single'
+        self._mode      = 'full'   # 'full' | 'single' | 'cbt'
         self.current_q  = 0
         self._selected  = 0
         self.answers    = [None] * TOTAL_QUESTIONS
@@ -363,9 +367,13 @@ class SKCTApp:
         self.q_start    = None
         self.subj_start = None
         self.ticking    = False
+        self._paused         = False   # single 모드 ESC 일시정지 여부
+        self._paused_elapsed = 0.0     # 일시정지 시점까지의 경과시간(초)
         self._calc_ref    = None
         self._calc_active = False   # 계산기 키보드 모드 여부
         self._alarm_played = False
+        self._cbt_round      = 0   # CBT 모드 현재 과목 (0~4)
+        self._cbt_rounds_data = []  # [(answers, times), ...]
 
         self._build_ui()
         self._show_start_overlay()
@@ -399,8 +407,13 @@ class SKCTApp:
                                   bg=BG, fg=DARK)
         self.timer_lbl.pack()
 
+        self.pause_lbl = tk.Label(left, text='',
+                                  font=('Apple SD Gothic Neo', 11),
+                                  bg=BG, fg=MID)
+        self.pause_lbl.pack()
+
         self.total_lbl = tk.Label(left, text='남은 시간  15:00',
-                                  font=('Apple SD Gothic Neo', 10),
+                                  font=('Apple SD Gothic Neo', 15, 'bold'),
                                   bg=BG, fg=MID)
         self.total_lbl.pack(pady=(2, 14))
 
@@ -480,6 +493,7 @@ class SKCTApp:
         self.root.bind('<KP_Divide>',   lambda e: self._kb_calc(e, '÷'))
         self.root.bind('<KP_Enter>',    lambda e: self._kb_calc(e, '='))
         self.root.bind('<Return>',      lambda e: self._kb_calc(e, '='))
+        self.root.bind('<Escape>',      lambda e: self._toggle_pause())
 
         # 메모장 / 그림판 클릭 → 계산기 비활성화
         self.root.bind('<Button-1>', self._on_root_click, add='+')
@@ -552,6 +566,19 @@ class SKCTApp:
         btn_frame = tk.Frame(inner, bg=BG)
         btn_frame.pack()
 
+        # CBT 모드
+        cbt_card = tk.Frame(btn_frame, bg=PANEL_BG, padx=24, pady=20)
+        cbt_card.pack(side='left', padx=12)
+        tk.Label(cbt_card, text='CBT 모드',
+                 font=('Apple SD Gothic Neo', 15, 'bold'),
+                 bg=PANEL_BG, fg=DARK).pack()
+        tk.Label(cbt_card, text='5과목 × 20문제 = 100문제\n과목당 15분 제한',
+                 font=('Apple SD Gothic Neo', 11),
+                 bg=PANEL_BG, fg=MID, justify='center').pack(pady=(6, 14))
+        FlatBtn(cbt_card, '시작', bg='#8e44ad', fg='white', hover_bg='#6c3483',
+                font=('Apple SD Gothic Neo', 13, 'bold'), padx=28, pady=8,
+                command=lambda: self._dismiss_overlay('cbt')).pack()
+
         # 20문제 모드
         left_card = tk.Frame(btn_frame, bg=PANEL_BG, padx=24, pady=20)
         left_card.pack(side='left', padx=12)
@@ -581,6 +608,9 @@ class SKCTApp:
     def _dismiss_overlay(self, mode):
         self._mode = mode
         self._overlay.destroy()
+        if mode == 'cbt':
+            self._cbt_round = 0
+            self._cbt_rounds_data = []
         self._reset_state()
         self._start_subject()
 
@@ -600,7 +630,7 @@ class SKCTApp:
         return overlay
 
     def _go_to_menu(self):
-        if self._mode == 'full' and self.ticking:
+        if self._mode in ('full', 'cbt') and self.ticking:
             def build(card, close):
                 tk.Label(card, text='진행 중인 풀이가 있습니다.',
                          font=('Apple SD Gothic Neo', 15, 'bold'),
@@ -655,8 +685,10 @@ class SKCTApp:
         self._begin_q()
 
     def _begin_q(self):
-        self.q_start   = time.time()
-        self.ticking   = True
+        self.q_start         = time.time()
+        self.ticking         = False
+        self._paused         = False
+        self._paused_elapsed = 0.0
         self._selected = 0
         self._reset_ans()
         self._memo_panel.reset()
@@ -670,12 +702,52 @@ class SKCTApp:
             self.total_lbl.config(text='제한시간  00:45', fg=MID)
             self.ans_grid_frame.pack_forget()
             self.next_btn.config(text='다음 문제  →')
+            self.root.after(300, self._start_tick)
         else:
-            self.q_lbl.config(text=f'문제 {self.current_q + 1} / {TOTAL_QUESTIONS}')
+            if self._mode == 'cbt':
+                subj = CBT_SUBJECTS[self._cbt_round]
+                self.q_lbl.config(text=f'{subj}  {self.current_q + 1}/{TOTAL_QUESTIONS}')
+            else:
+                self.q_lbl.config(text=f'문제 {self.current_q + 1} / {TOTAL_QUESTIONS}')
             self.ans_grid_frame.pack(fill='x', padx=14, pady=(14, 0))
             self.next_btn.config(text='다음 문제  →')
+            self.ticking = True
+            self._tick()
         self.menu_btn.pack(fill='x', padx=14, pady=(8, 0))
+
+    def _start_tick(self):
+        """300ms 지연 후 타이머 시작 (모든 모드 공통)"""
+        self.q_start = time.time()
+        self.ticking = True
         self._tick()
+
+    def _toggle_pause(self):
+        """single 모드 한정 — ESC로 타이머 일시정지/재개 / full·cbt 모드 — 다음 문제"""
+        if self._mode in ('full', 'cbt'):
+            self._advance()
+            return
+        if self._mode != 'single':
+            return
+        # 답을 이미 선택해 타이머가 멈춘 상태면 무시
+        if not self.ticking and not self._paused:
+            return
+        if self._paused:
+            # 재개: q_start를 경과시간만큼 뒤로 밀어서 누적 시간 유지
+            self._paused = False
+            self.q_start = time.time() - self._paused_elapsed
+            self.ticking = True
+            self.pause_lbl.config(text='')
+            self._tick()
+        else:
+            # 일시정지
+            self._paused_elapsed = time.time() - self.q_start
+            self._paused = True
+            self.ticking = False
+            # 타이머 레이블에 일시정지 표시
+            qm, qs = divmod(int(self._paused_elapsed), 60)
+            qcs = int(self._paused_elapsed * 10) % 10
+            self.timer_lbl.config(text=f'{qm:02d}:{qs:02d}.{qcs}', fg=MID)
+            self.pause_lbl.config(text='일시정지')
 
     def _tick(self):
         if not self.ticking:
@@ -688,13 +760,22 @@ class SKCTApp:
         qcs = int(q_el * 10) % 10
         self.timer_lbl.config(text=f'{qm:02d}:{qs:02d}.{qcs}',
                               fg=DANGER if q_el > WARN_SECONDS else DARK)
-        if self._mode == 'full':
+        if self._mode in ('full', 'cbt'):
             rm, rs = divmod(int(remain), 60)
             self.total_lbl.config(text=f'남은 시간  {rm:02d}:{rs:02d}',
                                   fg=DANGER if remain < 60 else MID)
             if remain == 0 and not self._alarm_played:
                 self._alarm_played = True
                 self._play_alarm(3)
+                self.ticking = False
+                elapsed = time.time() - self.q_start
+                self.answers[self.current_q] = self._selected
+                self.times[self.current_q] = elapsed
+                if self._mode == 'cbt':
+                    self._cbt_round_end()
+                else:
+                    self._show_results()
+                return
 
         self.root.after(100, self._tick)
 
@@ -768,7 +849,7 @@ class SKCTApp:
         # 계산기 비활성 시 메모장 포커스면 위젯이 자체 처리
 
     def _advance(self):
-        if self._mode == 'full' and not self.ticking:
+        if self._mode in ('full', 'cbt') and not self.ticking:
             return
 
         if self._mode == 'single':
@@ -778,7 +859,7 @@ class SKCTApp:
             self._start_subject()
             return
 
-        # full 모드
+        # full / cbt 모드
         elapsed = time.time() - self.q_start
         self.answers[self.current_q] = self._selected
         self.times[self.current_q]   = elapsed
@@ -786,10 +867,117 @@ class SKCTApp:
         self._update_ans_cell(self.current_q, self._selected)
         self.current_q += 1
         if self.current_q >= TOTAL_QUESTIONS:
-            self._show_results()
+            if self._mode == 'cbt':
+                self._cbt_round_end()
+            else:
+                self._show_results()
         else:
             self.ticking = True
             self._begin_q()
+
+    # ── CBT 모드 ─────────────────────────────────────────────
+
+    def _cbt_round_end(self):
+        self._cbt_rounds_data.append((list(self.answers), list(self.times)))
+        self._cbt_round += 1
+        if self._cbt_round >= 5:
+            self._cbt_show_results()
+        else:
+            self._cbt_show_transition()
+
+    def _cbt_show_transition(self):
+        subj_done = CBT_SUBJECTS[self._cbt_round - 1]
+        subj_next = CBT_SUBJECTS[self._cbt_round]
+        def build(card, close):
+            tk.Label(card, text=f'{subj_done} 완료!',
+                     font=('Apple SD Gothic Neo', 20, 'bold'),
+                     bg=BG, fg=DARK).pack(pady=(0, 6))
+            tk.Label(card, text=f'다음 과목 ({self._cbt_round + 1}/5): {subj_next}',
+                     font=('Apple SD Gothic Neo', 13),
+                     bg=BG, fg=MID).pack(pady=(0, 20))
+            FlatBtn(card, f'{subj_next} 시작  →',
+                    bg='#8e44ad', fg='white', hover_bg='#6c3483',
+                    font=('Apple SD Gothic Neo', 13, 'bold'),
+                    padx=24, pady=8,
+                    command=lambda: [close(), self._cbt_next_round()]).pack()
+        self._open_modal(build)
+
+    def _cbt_next_round(self):
+        self._reset_state()
+        self._start_subject()
+
+    def _cbt_show_results(self):
+        all_answers = []
+        all_times   = []
+        for answers, times in self._cbt_rounds_data:
+            all_answers.extend(answers)
+            all_times.extend(times)
+        total = sum(all_times)
+        tm, ts = divmod(int(total), 60)
+        slow   = sum(1 for t in all_times if t > WARN_SECONDS)
+        rounds_data = list(self._cbt_rounds_data)
+
+        def build(card, close):
+            tk.Label(card, text='CBT 결과 (100문제)',
+                     font=('Apple SD Gothic Neo', 20, 'bold'),
+                     bg=BG, fg=DARK).pack(pady=(0, 4))
+            tk.Label(card,
+                     text=f'총 소요시간: {tm:02d}:{ts:02d}   |   45초 초과: {slow}문제',
+                     font=('Apple SD Gothic Neo', 12),
+                     bg=BG, fg=MID).pack(pady=(0, 10))
+
+            frame = tk.Frame(card, bg=BG)
+            frame.pack(fill='both', expand=True)
+
+            style = ttk.Style(self.root)
+            style.theme_use('default')
+            style.configure('R.Treeview',
+                            background=PANEL_BG, fieldbackground=PANEL_BG,
+                            foreground=DARK,
+                            font=('Apple SD Gothic Neo', 12), rowheight=28)
+            style.configure('R.Treeview.Heading',
+                            background='#e0e0e0', foreground=DARK,
+                            font=('Apple SD Gothic Neo', 12, 'bold'), relief='flat')
+            style.map('R.Treeview',
+                      background=[('selected', ACCENT)],
+                      foreground=[('selected', 'white')])
+
+            cols = ('subj', 'no', 'answer', 'elapsed')
+            tree = ttk.Treeview(frame, columns=cols, show='headings',
+                                height=22, style='R.Treeview')
+            tree.heading('subj',    text='과목')
+            tree.heading('no',      text='문제')
+            tree.heading('answer',  text='선택한 답')
+            tree.heading('elapsed', text='소요 시간')
+            tree.column('subj',    width=100, anchor='center')
+            tree.column('no',      width=70,  anchor='center')
+            tree.column('answer',  width=110, anchor='center')
+            tree.column('elapsed', width=140, anchor='center')
+            tree.tag_configure('slow', foreground=DANGER)
+
+            for r, (answers, times) in enumerate(rounds_data):
+                subj = CBT_SUBJECTS[r]
+                for i in range(TOTAL_QUESTIONS):
+                    t = times[i]
+                    m, s = divmod(int(t), 60)
+                    ds   = int((t - int(t)) * 10)
+                    ans  = str(answers[i]) if answers[i] else 'x'
+                    tree.insert('', 'end',
+                                values=(subj, f'{i+1}번', ans, f'{m:02d}:{s:02d}.{ds}'),
+                                tags=('slow',) if t > WARN_SECONDS else ())
+
+            sb = ttk.Scrollbar(frame, orient='vertical', command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            tree.pack(side='left', fill='both', expand=True)
+            sb.pack(side='right', fill='y')
+
+            FlatBtn(card, '다시 시작',
+                    bg='#8e44ad', fg='white', hover_bg='#6c3483',
+                    font=('Apple SD Gothic Neo', 13),
+                    padx=24, pady=8,
+                    command=lambda: [close(), self._restart()]).pack(pady=(12, 0))
+
+        self._open_modal(build)
 
     # ── 결과 표 ──────────────────────────────────────────────
 
